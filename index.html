@@ -357,6 +357,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            flex-wrap: wrap;
             gap: 10px;
             margin-bottom: 20px;
         }
@@ -481,6 +482,12 @@
                         <option value="90">Fast</option>
                         <option value="60">Turbo</option>
                     </select>
+                    <label class="speed-label" for="modeSelect">Mode</label>
+                    <select id="modeSelect" class="speed-select">
+                        <option value="classic" selected>Classic</option>
+                        <option value="challenge">Challenge</option>
+                        <option value="mad">Mad</option>
+                    </select>
                 </div>
 
                 <div class="input-group">
@@ -552,6 +559,7 @@
         const wordDisplay = document.getElementById('wordDisplay');
         const mobileControls = document.getElementById('mobileControls');
         const speedSelect = document.getElementById('speedSelect');
+        const modeSelect = document.getElementById('modeSelect');
 
         // ──────────────────────────────────────
         // CANVAS SETUP
@@ -572,8 +580,11 @@
         let direction = { x: 1, y: 0 };
         let nextDirection = { x: 1, y: 0 };
         let food = null; // { x, y, letter, index }
+        let decoys = []; // [{ x, y, letter }] — only populated in 'challenge' mode
+        let gameMode = 'classic'; // 'classic' | 'challenge'
+        const DECOY_COUNT = 2;
         let collectedLetters = [];
-        let foodLetterIndex = 1;
+        let foodLetterIndex = 0;
         let particles = [];
         let moveTimer = 0;
         let moveInterval = 140; // default speed, will be updated from selector
@@ -636,6 +647,7 @@
             const occupied = new Set();
             for (const seg of snake) occupied.add(`${seg.x},${seg.y}`);
             if (food) occupied.add(`${food.x},${food.y}`);
+            for (const d of decoys) occupied.add(`${d.x},${d.y}`);
             const empty = [];
             for (let x = 0; x < GRID_COLS; x++) {
                 for (let y = 0; y < GRID_ROWS; y++) {
@@ -657,28 +669,58 @@
             };
         }
 
+        function addDecoys(count) {
+            if (!food) return;
+            // Pick `count` random letters from A-Z, excluding the current target,
+            // no duplicates within this batch (across batches they can repeat).
+            const pool = [];
+            for (let c = 65; c <= 90; c++) {
+                const ch = String.fromCharCode(c);
+                if (ch !== food.letter) pool.push(ch);
+            }
+            for (let i = pool.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [pool[i], pool[j]] = [pool[j], pool[i]];
+            }
+            const letters = pool.slice(0, count);
+            for (let i = 0; i < letters.length; i++) {
+                const empty = getEmptyCells();
+                if (empty.length === 0) return;
+                const pos = empty[Math.floor(Math.random() * empty.length)];
+                decoys.push({ x: pos.x, y: pos.y, letter: letters[i] });
+            }
+        }
+
+        function spawnDecoys() {
+            decoys = [];
+            if ((gameMode !== 'challenge' && gameMode !== 'mad') || !food) return;
+            addDecoys(DECOY_COUNT);
+        }
+
         function resetGame() {
             snake = [];
             direction = { x: 1, y: 0 };
             nextDirection = { x: 1, y: 0 };
             collectedLetters = [];
-            foodLetterIndex = 1;
+            foodLetterIndex = 0;
             particles = [];
+            decoys = [];
             moveTimer = 0;
             shakeAmount = 0;
             foodPulseTime = 0;
 
             const startX = Math.floor(GRID_COLS / 2);
             const startY = Math.floor(GRID_ROWS / 2);
-            snake.push({ x: startX, y: startY, letter: word[0] });
+            snake.push({ x: startX, y: startY });
 
             food = spawnFood();
+            spawnDecoys();
             updateWordDisplay();
             updateProgress();
         }
 
         function updateProgress() {
-            const totalLetters = word.length - 1;
+            const totalLetters = word.length;
             const collected = collectedLetters.length;
             const pct = totalLetters > 0 ? (collected / totalLetters) * 100 : 0;
             progressFill.style.width = pct + '%';
@@ -691,9 +733,7 @@
                 const letterEl = document.createElement('span');
                 letterEl.className = 'word-letter';
                 letterEl.textContent = word[i];
-                if (i === 0) {
-                    letterEl.classList.add('collected');
-                } else if (i < foodLetterIndex) {
+                if (i < foodLetterIndex) {
                     letterEl.classList.add('collected');
                 }
                 if (i === foodLetterIndex && food && gameState === 'playing') {
@@ -714,7 +754,21 @@
                 return;
             }
 
-            const willEat = food && newHeadX === food.x && newHeadY === food.y;
+            const targetLetter = word[foodLetterIndex];
+            const hitFood = food && newHeadX === food.x && newHeadY === food.y;
+            const decoyIdx = decoys.findIndex(d => d.x === newHeadX && d.y === newHeadY);
+            const hitDecoy = decoyIdx >= 0;
+            const hitPellet = hitFood || hitDecoy;
+
+            if (hitPellet) {
+                const pelletLetter = hitFood ? food.letter : decoys[decoyIdx].letter;
+                if (pelletLetter !== targetLetter) {
+                    endGame(false);
+                    return;
+                }
+            }
+
+            const willEat = hitPellet;
             const checkLength = willEat ? snake.length : snake.length - 1;
             for (let i = 0; i < checkLength; i++) {
                 if (snake[i].x === newHeadX && snake[i].y === newHeadY) {
@@ -723,29 +777,54 @@
                 }
             }
 
-            const newHead = { x: newHeadX, y: newHeadY, letter: word[0] };
+            const newHead = { x: newHeadX, y: newHeadY };
             snake.unshift(newHead);
 
             if (willEat) {
-                collectedLetters.push(food.letter);
+                collectedLetters.push(targetLetter);
                 foodLetterIndex++;
 
-                const fx = food.x * CELL_SIZE + CELL_SIZE / 2;
-                const fy = food.y * CELL_SIZE + CELL_SIZE / 2;
+                const fx = newHeadX * CELL_SIZE + CELL_SIZE / 2;
+                const fy = newHeadY * CELL_SIZE + CELL_SIZE / 2;
                 spawnParticles(fx, fy, 25, '#ffaa00', '#ffc444');
                 shakeAmount = 4;
+
+                // Remove only the eaten pellet.
+                if (hitFood) {
+                    food = null;
+                } else {
+                    decoys.splice(decoyIdx, 1);
+                }
 
                 if (foodLetterIndex >= word.length) {
                     setTimeout(() => { endGame(true); }, 300);
                     food = null;
+                    decoys = [];
                     updateWordDisplay();
                     updateProgress();
                     return;
                 }
+
+                // In Mad mode, a leftover correct-food pellet (when the user ate a
+                // matching decoy instead) now shows the previous letter — it becomes
+                // a regular decoy for the next round.
+                if (gameMode === 'mad' && food) {
+                    decoys.push(food);
+                    food = null;
+                }
+
                 food = spawnFood();
                 if (!food) {
                     endGame(true);
                     return;
+                }
+                // Challenge reshuffles its decoys each round; Mad keeps every
+                // existing pellet AND adds DECOY_COUNT new ones, so the board
+                // grows over time.
+                if (gameMode === 'challenge') {
+                    spawnDecoys();
+                } else if (gameMode === 'mad') {
+                    addDecoys(DECOY_COUNT);
                 }
             } else {
                 snake.pop();
@@ -761,7 +840,7 @@
                 gameContainer.classList.add('win-glow');
                 gameContainer.classList.remove('danger-glow');
                 winOverlay.classList.remove('hidden');
-                winMsg.textContent = `You completed the word: "${word}"\nLetters collected: ${collectedLetters.length}/${word.length - 1}`;
+                winMsg.textContent = `You completed the word: "${word}"\nLetters collected: ${collectedLetters.length}/${word.length}`;
                 const cx = CANVAS_SIZE / 2, cy = CANVAS_SIZE / 2;
                 spawnParticles(cx, cy, 80, '#00ff88', '#ffaa00');
                 spawnParticles(cx-60, cy-30, 40, '#ffc444', '#ffffff');
@@ -770,8 +849,8 @@
                 gameContainer.classList.add('danger-glow');
                 gameContainer.classList.remove('win-glow');
                 gameOverOverlay.classList.remove('hidden');
-                const partial = word[0] + collectedLetters.join('');
-                gameOverMsg.textContent = `Partial word: "${partial}"\nLetters collected: ${collectedLetters.length}/${word.length - 1}`;
+                const partial = collectedLetters.join('');
+                gameOverMsg.textContent = `Partial word: "${partial}"\nLetters collected: ${collectedLetters.length}/${word.length}`;
                 spawnParticles(
                     snake[0].x * CELL_SIZE + CELL_SIZE/2,
                     snake[0].y * CELL_SIZE + CELL_SIZE/2,
@@ -795,8 +874,9 @@
             snake = [];
             food = null;
             collectedLetters = [];
-            foodLetterIndex = 1;
+            foodLetterIndex = 0;
             particles = [];
+            decoys = [];
             progressFill.style.width = '0%';
             progressText.textContent = '0/0';
             wordDisplay.innerHTML = '';
@@ -822,8 +902,9 @@
                 return;
             }
 
-            // Apply selected speed
+            // Apply selected speed and mode
             moveInterval = parseInt(speedSelect.value, 10);
+            gameMode = ['classic', 'challenge', 'mad'].includes(modeSelect.value) ? modeSelect.value : 'classic';
 
             word = rawWord;
             errorMsg.textContent = '';
@@ -853,10 +934,9 @@
             }
         }
 
-        function drawFood(ctx, time) {
-            if (!food) return;
-            const cx = food.x * CELL_SIZE + CELL_SIZE/2;
-            const cy = food.y * CELL_SIZE + CELL_SIZE/2;
+        function drawPellet(ctx, time, gridX, gridY, letter) {
+            const cx = gridX * CELL_SIZE + CELL_SIZE/2;
+            const cy = gridY * CELL_SIZE + CELL_SIZE/2;
             const pulse = 1 + Math.sin(time * 4.5) * 0.18;
             const radius = (CELL_SIZE/2 - 4) * pulse;
             const glowRadius = radius + 10 + Math.sin(time*4.5)*4;
@@ -885,7 +965,12 @@
             ctx.font = 'bold 15px "Segoe UI", "Inter", system-ui, sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(food.letter, cx, cy+1);
+            ctx.fillText(letter, cx, cy+1);
+        }
+
+        function drawFood(ctx, time) {
+            if (food) drawPellet(ctx, time, food.x, food.y, food.letter);
+            for (const d of decoys) drawPellet(ctx, time, d.x, d.y, d.letter);
         }
 
         function drawSnake(ctx) {
@@ -924,12 +1009,14 @@
                     ctx.stroke();
                 }
 
-                ctx.fillStyle = isHead ? '#003318' : '#ffffff';
-                ctx.font = `bold ${isHead ? 14 : 13}px "Segoe UI", "Inter", system-ui, sans-serif`;
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                const letterToShow = i === 0 ? word[0] : (collectedLetters[i-1] || '');
-                ctx.fillText(letterToShow, sx+CELL_SIZE/2, sy+CELL_SIZE/2+1);
+                if (!isHead) {
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 13px "Segoe UI", "Inter", system-ui, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    const letterToShow = collectedLetters[i-1] || '';
+                    ctx.fillText(letterToShow, sx+CELL_SIZE/2, sy+CELL_SIZE/2+1);
+                }
 
                 if (isHead) {
                     const eyeSize = 3.5, eyeOffsetX = 7, eyeOffsetY = -6;
