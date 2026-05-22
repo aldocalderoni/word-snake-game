@@ -487,6 +487,7 @@
                         <option value="classic" selected>Classic</option>
                         <option value="challenge">Challenge</option>
                         <option value="mad">Mad</option>
+                        <option value="unhinged">Utterly Unhinged</option>
                     </select>
                 </div>
 
@@ -580,9 +581,20 @@
         let direction = { x: 1, y: 0 };
         let nextDirection = { x: 1, y: 0 };
         let food = null; // { x, y, letter, index }
-        let decoys = []; // [{ x, y, letter }] — only populated in 'challenge' mode
-        let gameMode = 'classic'; // 'classic' | 'challenge'
+        let decoys = []; // [{ x, y, letter }] — populated in challenge/mad/unhinged
+        let gameMode = 'classic'; // 'classic' | 'challenge' | 'mad' | 'unhinged'
         const DECOY_COUNT = 2;
+
+        // 'unhinged' mode: a second, AI-controlled snake hunting the correct food.
+        let redSnake = []; // [{x, y}] segments, head first
+        let redDirection = { x: 1, y: 0 };
+        let redMoveTimer = 0;
+        let redMoveInterval = 200;
+        const RED_SPEED_FACTOR = 1.4; // red moves slower than green by this factor
+        const RED_RESPAWN_DELAY = 1000; // ms before red comes back after dying
+        const RED_INITIAL_LENGTH = 3;
+        let redAlive = false;
+        let redRespawnTimer = 0;
         let collectedLetters = [];
         let foodLetterIndex = 0;
         let particles = [];
@@ -648,6 +660,7 @@
             for (const seg of snake) occupied.add(`${seg.x},${seg.y}`);
             if (food) occupied.add(`${food.x},${food.y}`);
             for (const d of decoys) occupied.add(`${d.x},${d.y}`);
+            for (const seg of redSnake) occupied.add(`${seg.x},${seg.y}`);
             const empty = [];
             for (let x = 0; x < GRID_COLS; x++) {
                 for (let y = 0; y < GRID_ROWS; y++) {
@@ -693,8 +706,156 @@
 
         function spawnDecoys() {
             decoys = [];
-            if ((gameMode !== 'challenge' && gameMode !== 'mad') || !food) return;
+            if (gameMode === 'classic' || !food) return;
             addDecoys(DECOY_COUNT);
+        }
+
+        // ──────────────────────────────────────
+        // RED SNAKE (Utterly Unhinged mode)
+        // ──────────────────────────────────────
+        function spawnRedSnake() {
+            // Find the board corner farthest from the green snake's head that's free.
+            const greenHead = snake[0] || { x: 0, y: 0 };
+            const corners = [
+                { x: 0, y: 0 },
+                { x: GRID_COLS - 1, y: 0 },
+                { x: 0, y: GRID_ROWS - 1 },
+                { x: GRID_COLS - 1, y: GRID_ROWS - 1 },
+            ];
+            corners.sort((a, b) => {
+                const da = Math.abs(a.x - greenHead.x) + Math.abs(a.y - greenHead.y);
+                const db = Math.abs(b.x - greenHead.x) + Math.abs(b.y - greenHead.y);
+                return db - da;
+            });
+            const isFree = (x, y) => {
+                if (x < 0 || x >= GRID_COLS || y < 0 || y >= GRID_ROWS) return false;
+                if (snake.some(s => s.x === x && s.y === y)) return false;
+                if (food && food.x === x && food.y === y) return false;
+                if (decoys.some(d => d.x === x && d.y === y)) return false;
+                return true;
+            };
+            let headPos = null;
+            for (const c of corners) {
+                if (isFree(c.x, c.y)) { headPos = c; break; }
+            }
+            if (!headPos) {
+                // fallback: scan for any empty cell
+                const empty = getEmptyCells();
+                if (empty.length === 0) {
+                    redAlive = false;
+                    redRespawnTimer = RED_RESPAWN_DELAY;
+                    return;
+                }
+                headPos = empty[0];
+            }
+            // Initial direction points inward from the chosen corner.
+            redDirection = {
+                x: headPos.x === 0 ? 1 : (headPos.x === GRID_COLS - 1 ? -1 : 1),
+                y: 0,
+            };
+            redSnake = [{ x: headPos.x, y: headPos.y }];
+            // Tail extends away from movement direction, but only if cells are free.
+            for (let i = 1; i < RED_INITIAL_LENGTH; i++) {
+                const bx = headPos.x - redDirection.x * i;
+                const by = headPos.y - redDirection.y * i;
+                if (isFree(bx, by) && !redSnake.some(s => s.x === bx && s.y === by)) {
+                    redSnake.push({ x: bx, y: by });
+                }
+            }
+            redAlive = true;
+            redMoveTimer = 0;
+        }
+
+        function killRedSnake() {
+            if (redSnake.length > 0) {
+                const head = redSnake[0];
+                spawnParticles(
+                    head.x * CELL_SIZE + CELL_SIZE / 2,
+                    head.y * CELL_SIZE + CELL_SIZE / 2,
+                    30, '#ff3355', '#ff6688'
+                );
+            }
+            redSnake = [];
+            redAlive = false;
+            redRespawnTimer = RED_RESPAWN_DELAY;
+        }
+
+        function moveRedSnake() {
+            if (redSnake.length === 0 || !food) return;
+            const head = redSnake[0];
+            const moves = [
+                { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 },
+            ];
+            // A cell is "in red body" if any segment except the tail occupies it
+            // (the tail will move out of the way this tick — unless we're about to eat,
+            // in which case the tail stays).
+            const willEatAt = (x, y) => food && x === food.x && y === food.y;
+            const inRedBody = (x, y) => {
+                const limit = willEatAt(x, y) ? redSnake.length : redSnake.length - 1;
+                for (let i = 0; i < limit; i++) {
+                    if (redSnake[i].x === x && redSnake[i].y === y) return true;
+                }
+                return false;
+            };
+            const inGreen = (x, y) => snake.some(s => s.x === x && s.y === y);
+
+            const safe = [], risky = [];
+            for (const m of moves) {
+                const nx = head.x + m.x, ny = head.y + m.y;
+                if (nx < 0 || nx >= GRID_COLS || ny < 0 || ny >= GRID_ROWS) continue;
+                if (inRedBody(nx, ny)) continue;
+                const entry = { dir: m, nx, ny };
+                if (inGreen(nx, ny)) risky.push(entry);
+                else safe.push(entry);
+            }
+
+            const pickClosest = (arr) => {
+                let bestDist = Infinity, tied = [];
+                for (const c of arr) {
+                    const d = Math.abs(c.nx - food.x) + Math.abs(c.ny - food.y);
+                    if (d < bestDist) { bestDist = d; tied = [c]; }
+                    else if (d === bestDist) tied.push(c);
+                }
+                return tied[Math.floor(Math.random() * tied.length)];
+            };
+
+            let chosen = null;
+            if (safe.length > 0) chosen = pickClosest(safe);
+            else if (risky.length > 0) chosen = pickClosest(risky);
+            else {
+                // No legal move — red dies, will respawn.
+                killRedSnake();
+                return;
+            }
+
+            redDirection = chosen.dir;
+            const newHead = { x: chosen.nx, y: chosen.ny };
+            const ateFood = willEatAt(newHead.x, newHead.y);
+            redSnake.unshift(newHead);
+            if (!ateFood) redSnake.pop();
+
+            // Red head touching green segment → player loses.
+            if (snake.some(s => s.x === newHead.x && s.y === newHead.y)) {
+                endGame(false);
+                return;
+            }
+
+            // Red stole the correct letter: respawn it and reshuffle decoys.
+            if (ateFood) {
+                spawnParticles(
+                    newHead.x * CELL_SIZE + CELL_SIZE / 2,
+                    newHead.y * CELL_SIZE + CELL_SIZE / 2,
+                    20, '#ff3355', '#ffaa00'
+                );
+                food = spawnFood();
+                if (!food) {
+                    endGame(false);
+                    return;
+                }
+                if (gameMode !== 'classic') {
+                    spawnDecoys();
+                }
+            }
         }
 
         function resetGame() {
@@ -715,6 +876,16 @@
 
             food = spawnFood();
             spawnDecoys();
+
+            // Reset and spawn the red snake for unhinged mode.
+            redSnake = [];
+            redAlive = false;
+            redRespawnTimer = 0;
+            redMoveTimer = 0;
+            if (gameMode === 'unhinged') {
+                spawnRedSnake();
+            }
+
             updateWordDisplay();
             updateProgress();
         }
@@ -750,6 +921,12 @@
             const newHeadY = head.y + direction.y;
 
             if (newHeadX < 0 || newHeadX >= GRID_COLS || newHeadY < 0 || newHeadY >= GRID_ROWS) {
+                endGame(false);
+                return;
+            }
+
+            // Green head touching any red-snake segment is a player loss.
+            if (redSnake.some(s => s.x === newHeadX && s.y === newHeadY)) {
                 endGame(false);
                 return;
             }
@@ -818,10 +995,10 @@
                     endGame(true);
                     return;
                 }
-                // Challenge reshuffles its decoys each round; Mad keeps every
+                // Challenge / Unhinged reshuffle their decoys each round; Mad keeps every
                 // existing pellet AND adds DECOY_COUNT new ones, so the board
                 // grows over time.
-                if (gameMode === 'challenge') {
+                if (gameMode === 'challenge' || gameMode === 'unhinged') {
                     spawnDecoys();
                 } else if (gameMode === 'mad') {
                     addDecoys(DECOY_COUNT);
@@ -877,6 +1054,10 @@
             foodLetterIndex = 0;
             particles = [];
             decoys = [];
+            redSnake = [];
+            redAlive = false;
+            redRespawnTimer = 0;
+            redMoveTimer = 0;
             progressFill.style.width = '0%';
             progressText.textContent = '0/0';
             wordDisplay.innerHTML = '';
@@ -904,7 +1085,8 @@
 
             // Apply selected speed and mode
             moveInterval = parseInt(speedSelect.value, 10);
-            gameMode = ['classic', 'challenge', 'mad'].includes(modeSelect.value) ? modeSelect.value : 'classic';
+            gameMode = ['classic', 'challenge', 'mad', 'unhinged'].includes(modeSelect.value) ? modeSelect.value : 'classic';
+            redMoveInterval = Math.round(moveInterval * RED_SPEED_FACTOR);
 
             word = rawWord;
             errorMsg.textContent = '';
@@ -1041,6 +1223,95 @@
             }
         }
 
+        function drawRedSnake(ctx) {
+            if (redSnake.length === 0) return;
+            for (let i = redSnake.length-1; i >= 0; i--) {
+                const seg = redSnake[i];
+                const sx = seg.x * CELL_SIZE, sy = seg.y * CELL_SIZE;
+                const padding = 3, radius = 7;
+                const isHead = (i === 0);
+
+                ctx.shadowColor = isHead ? 'rgba(255,51,85,0.9)' : 'rgba(180,40,60,0.5)';
+                ctx.shadowBlur = isHead ? 18 : 8;
+
+                const grad = ctx.createLinearGradient(sx, sy, sx+CELL_SIZE, sy+CELL_SIZE);
+                if (isHead) {
+                    grad.addColorStop(0, '#ff5577'); grad.addColorStop(1, '#cc1133');
+                } else {
+                    const t = i / Math.max(1, redSnake.length-1);
+                    const r = Math.round(220 - t*60);
+                    const g = Math.round(40 + t*10);
+                    const b = Math.round(70 - t*30);
+                    grad.addColorStop(0, `rgb(${r},${g},${b})`);
+                    grad.addColorStop(1, `rgb(${Math.round(r*0.7)},${Math.round(g*0.7)},${Math.round(b*0.6)})`);
+                }
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.roundRect(sx+padding, sy+padding, CELL_SIZE-padding*2, CELL_SIZE-padding*2, radius);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                if (isHead) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.roundRect(sx+padding, sy+padding, CELL_SIZE-padding*2, CELL_SIZE-padding*2, radius);
+                    ctx.stroke();
+
+                    // Direction-agnostic eye + brow geometry: `fwd` points where the
+                    // snake is going; `side` is perpendicular, so eye1/eye2 sit
+                    // symmetrically on either side of the head's facing axis.
+                    const fwd = redDirection;
+                    const side = { x: fwd.y, y: -fwd.x };
+                    const hcx = sx + CELL_SIZE/2, hcy = sy + CELL_SIZE/2;
+                    const EYE_FWD = 7, EYE_SIDE = 6, EYE_SIZE = 3.6;
+                    const ex1 = hcx + fwd.x*EYE_FWD + side.x*EYE_SIDE;
+                    const ey1 = hcy + fwd.y*EYE_FWD + side.y*EYE_SIDE;
+                    const ex2 = hcx + fwd.x*EYE_FWD - side.x*EYE_SIDE;
+                    const ey2 = hcy + fwd.y*EYE_FWD - side.y*EYE_SIDE;
+
+                    // Sclera — burnt-orange glow, meaner than plain yellow.
+                    ctx.fillStyle = '#ffaa22';
+                    ctx.shadowColor = 'rgba(255,140,40,0.95)';
+                    ctx.shadowBlur = 7;
+                    ctx.beginPath(); ctx.arc(ex1, ey1, EYE_SIZE, 0, Math.PI*2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(ex2, ey2, EYE_SIZE, 0, Math.PI*2); ctx.fill();
+                    ctx.shadowBlur = 0;
+
+                    // Reptilian slit pupils, oriented along the snake's facing axis.
+                    const slitAngle = Math.atan2(fwd.y, fwd.x);
+                    ctx.fillStyle = '#000000';
+                    ctx.beginPath();
+                    ctx.ellipse(ex1, ey1, EYE_SIZE*0.95, EYE_SIZE*0.32, slitAngle, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.ellipse(ex2, ey2, EYE_SIZE*0.95, EYE_SIZE*0.32, slitAngle, 0, Math.PI*2);
+                    ctx.fill();
+
+                    // Angled brows — outer end higher (further forward), inner end
+                    // closer to the centerline, forming a V-shaped scowl across the face.
+                    ctx.strokeStyle = '#1a0006';
+                    ctx.lineWidth = 2.2;
+                    ctx.lineCap = 'round';
+                    ctx.shadowColor = 'rgba(255,40,70,0.55)';
+                    ctx.shadowBlur = 3;
+                    const drawBrow = (eyeX, eyeY, sgnX, sgnY) => {
+                        const outerX = eyeX + fwd.x*2.6 + sgnX*3.6;
+                        const outerY = eyeY + fwd.y*2.6 + sgnY*3.6;
+                        const innerX = eyeX + fwd.x*1.0 - sgnX*1.4;
+                        const innerY = eyeY + fwd.y*1.0 - sgnY*1.4;
+                        ctx.beginPath();
+                        ctx.moveTo(outerX, outerY);
+                        ctx.lineTo(innerX, innerY);
+                        ctx.stroke();
+                    };
+                    drawBrow(ex1, ey1, side.x, side.y);
+                    drawBrow(ex2, ey2, -side.x, -side.y);
+                    ctx.shadowBlur = 0;
+                }
+            }
+        }
+
         function drawVignette(ctx) {
             const gradient = ctx.createRadialGradient(CANVAS_SIZE/2, CANVAS_SIZE/2, CANVAS_SIZE*0.55, CANVAS_SIZE/2, CANVAS_SIZE/2, CANVAS_SIZE*0.78);
             gradient.addColorStop(0, 'rgba(0,0,0,0)');
@@ -1064,6 +1335,7 @@
             ctx.translate(shakeX, shakeY);
             drawGrid(ctx);
             if (food) drawFood(ctx, time);
+            drawRedSnake(ctx);
             drawSnake(ctx);
             drawParticles(ctx);
             drawVignette(ctx);
@@ -1087,6 +1359,20 @@
                     moveTimer -= moveInterval;
                     moveSnake();
                     if (gameState !== 'playing') break;
+                }
+                // Red snake tick (Utterly Unhinged mode)
+                if (gameMode === 'unhinged' && gameState === 'playing') {
+                    if (redAlive) {
+                        redMoveTimer += dt * 1000;
+                        while (redMoveTimer >= redMoveInterval) {
+                            redMoveTimer -= redMoveInterval;
+                            moveRedSnake();
+                            if (gameState !== 'playing') break;
+                        }
+                    } else {
+                        redRespawnTimer -= dt * 1000;
+                        if (redRespawnTimer <= 0) spawnRedSnake();
+                    }
                 }
                 updateParticles(dt);
             } else if (gameState === 'win' || gameState === 'gameover') {
