@@ -11,7 +11,7 @@ A neon-styled twist on the classic Snake game. Instead of eating generic food, t
 
 ## Play
 
-Open `snake.html` in any modern browser — no build step, no dependencies.
+Open `index.html` in any modern browser — no build step, no dependencies.
 
 ## Controls
 
