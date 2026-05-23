@@ -595,6 +595,7 @@
         const RED_INITIAL_LENGTH = 3;
         let redAlive = false;
         let redRespawnTimer = 0;
+        let redFoodEaten = 0; // running tally; reaching word.length is a player loss
         let collectedLetters = [];
         let foodLetterIndex = 0;
         let particles = [];
@@ -847,6 +848,12 @@
                     newHead.y * CELL_SIZE + CELL_SIZE / 2,
                     20, '#ff3355', '#ffaa00'
                 );
+                redFoodEaten++;
+                // If red has eaten as many letters as the whole word, player loses.
+                if (redFoodEaten >= word.length) {
+                    endGame(false);
+                    return;
+                }
                 food = spawnFood();
                 if (!food) {
                     endGame(false);
@@ -882,6 +889,7 @@
             redAlive = false;
             redRespawnTimer = 0;
             redMoveTimer = 0;
+            redFoodEaten = 0;
             if (gameMode === 'unhinged') {
                 spawnRedSnake();
             }
@@ -1058,6 +1066,7 @@
             redAlive = false;
             redRespawnTimer = 0;
             redMoveTimer = 0;
+            redFoodEaten = 0;
             progressFill.style.width = '0%';
             progressText.textContent = '0/0';
             wordDisplay.innerHTML = '';
